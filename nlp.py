@@ -327,6 +327,16 @@ elif task == "Chatbot":
             {"role": "assistant", "content": "Hello! I am a general-purpose chatbot powered by Gemini 2.5 Flash. How can I help you today?"}
         )
     
+     # Initialize the chat session with the system instruction and history
+    model = genai.GenerativeModel(
+        MODEL_NAME,
+        system_instruction=system_instruction_text
+    )
+    chat_session = model.start_chat(history=[
+        {"role": "user" if m["role"] == "user" else "model", "parts": [m["content"]]}
+        for m in st.session_state.messages
+    ])
+
     # Display chat messages from history
     for message in st.session_state.messages:
         with st.chat_message(message["role"]):
@@ -342,19 +352,8 @@ elif task == "Chatbot":
         
         with st.spinner("Thinking..."):
             try:
-                  # Send the entire chat history and system instruction to the model
-                full_history = [
-                    {"role": "user" if m["role"] == "user" else "model", "parts": [m["content"]]}
-                    for m in st.session_state.messages
-                ]
-                
-                response = genai.GenerativeModel(
-                    MODEL_NAME,
-                    system_instruction=system_instruction_text
-                ).generate_content(
-                    full_history,
-                    stream=True
-                )
+                 # Use the chat session to send the new message, which maintains history
+                response = chat_session.send_message(prompt, stream=True)
                 
                 # Display the streaming response
                 with st.chat_message("assistant"):
