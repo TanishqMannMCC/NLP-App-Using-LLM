@@ -357,7 +357,11 @@ elif task == "Chatbot":
                 
                 # Display the streaming response
                 with st.chat_message("assistant"):
-                    st.write_stream(response)
+                     # The fix is to iterate through the stream to get the parts of the response
+                    final_response_text = ""
+                    for chunk in response:
+                        final_response_text += chunk.text
+                    st.markdown(final_response_text)
                 
                 # Update chat history with the assistant's final response
                 st.session_state.messages.append({"role": "assistant", "content": response.text})
