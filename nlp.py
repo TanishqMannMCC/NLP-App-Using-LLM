@@ -2,11 +2,11 @@ import streamlit as st
 import google.generativeai as genai
 import json
 import os
+import docx
+import fitz # PyMuPDF
+import sys # Import the sys module to handle exceptions
 
 # Set up the Gemini API key.
-# This will be provided at runtime by the environment.
-# On your local machine, set it as an environment variable:
-# export GEMINI_API_KEY="YOUR_API_KEY_HERE"
 API_KEY = os.environ.get("GEMINI_API_KEY", "")
 if not API_KEY:
     st.error("Gemini API key not found. Please set the GEMINI_API_KEY environment variable.")
@@ -50,6 +50,36 @@ This app uses a single LLM (`gemini-2.5-flash`)
 and custom prompts to perform all these tasks.
 No separate models are needed for each functionality.
 """)
+
+def read_file_content(file):
+    """Reads the content of various file types and returns it as a single string."""
+    file_extension = file.name.split('.')[-1].lower()
+    
+    if file_extension == 'txt':
+        return file.read().decode('utf-8')
+    elif file_extension == 'docx':
+        try:
+            doc = docx.Document(file)
+            full_text = []
+            for para in doc.paragraphs:
+                full_text.append(para.text)
+            return '\n'.join(full_text)
+        except Exception as e:
+            st.error(f"Error reading DOCX file: {e}")
+            return None
+    elif file_extension == 'pdf':
+        try:
+            with fitz.open(stream=file.read(), filetype="pdf") as doc:
+                text = ""
+                for page in doc:
+                    text += page.get_text()
+                return text
+        except Exception as e:
+            st.error(f"Error reading PDF file: {e}")
+            return None
+    else:
+        st.warning(f"Unsupported file type: {file_extension}. Please upload a .txt, .docx, or .pdf file.")
+        return None
 
 # --- Task 1: Sentiment & Emotion Analysis ---
 if task == "Sentiment & Emotion Analysis":
@@ -312,30 +342,56 @@ elif task == "Grammatical Error Correction":
 
 # --- Task 9: Chatbot ---
 elif task == "Chatbot":
-    st.header("Chatbot")
-    st.markdown("Engage in a conversation with the LLM.")
+    st.header("Chat with your Document")
+    st.markdown("Upload a document and ask questions about its content. The bot will only use the provided document to answer. If no document is uploaded, it will be a general-purpose chatbot.")
 
-    # Set a system instruction to ensure conversational, non-code output
-    system_instruction_text = "You are a general-purpose conversational chatbot. Your responses should be in plain text and should avoid using code blocks unless the user explicitly requests code or asks a technical question requiring code."
-
+    # New file uploader widget
+    uploaded_file = st.file_uploader(
+        "Upload a document (.txt, .docx, or .pdf only)",
+        type=["txt", "docx", "pdf"]
+    )
     
-    # Initialize chat history in session state if it doesn't exist
+    # Store the document content in session state
+    if uploaded_file:
+        if "document_content" not in st.session_state or st.session_state.document_name != uploaded_file.name:
+            try:
+                doc_content = read_file_content(uploaded_file)
+                st.session_state.document_content = doc_content
+                st.session_state.document_name = uploaded_file.name
+                if doc_content:
+                    st.success(f"Successfully loaded '{uploaded_file.name}'! You can now ask questions.")
+                st.session_state.messages = [] # Clear history for new document
+            except Exception as e:
+                st.error(f"Error processing file: {e}")
+                if "document_content" in st.session_state:
+                    del st.session_state.document_content
+                if "document_name" in st.session_state:
+                    del st.session_state.document_name
+    else:
+        # If no file is uploaded, clear document-related state
+        if "document_content" in st.session_state:
+            del st.session_state.document_content
+        if "document_name" in st.session_state:
+            del st.session_state.document_name
+
+    # Set system instruction dynamically based on whether a document is loaded
+    if "document_content" in st.session_state and st.session_state.document_content:
+        system_instruction_text = (
+            "You are a helpful assistant specialized in answering questions about the provided document. "
+            "Your responses should be in plain text and based ONLY on the document content. "
+            "Do not use any outside knowledge. If the answer is not in the document, say 'I cannot find the answer in the provided document.' Then, if the topic is well-known, offer to explain it from your general knowledge. For example, 'However, I can provide a general explanation of [topic] if you would like.' Respond to the user with this format."
+        )
+    else:
+        system_instruction_text = (
+            "You are a general-purpose conversational chatbot. Your responses should be in plain text and should avoid using code blocks unless the user explicitly requests code or asks a technical question requiring code."
+        )
+
+    # Initialize chat history in session state
     if "messages" not in st.session_state:
         st.session_state.messages = []
-        # Add a welcome message
         st.session_state.messages.append(
-            {"role": "assistant", "content": "Hello! I am a general-purpose chatbot powered by Gemini 2.5 Flash. How can I help you today?"}
+            {"role": "model", "content": "Hello! I am a general-purpose chatbot. How can I help you today?"}
         )
-    
-     # Initialize the chat session with the system instruction and history
-    model = genai.GenerativeModel(
-        MODEL_NAME,
-        system_instruction=system_instruction_text
-    )
-    chat_session = model.start_chat(history=[
-        {"role": "user" if m["role"] == "user" else "model", "parts": [m["content"]]}
-        for m in st.session_state.messages
-    ])
 
     # Display chat messages from history
     for message in st.session_state.messages:
@@ -343,27 +399,49 @@ elif task == "Chatbot":
             st.markdown(message["content"])
 
     # React to user input
-    if prompt := st.chat_input("What is up?"):
+    if prompt := st.chat_input("Ask a question..."):
+        # Add user message to chat history
+        st.session_state.messages.append({"role": "user", "content": prompt})
+
         # Display user message in chat message container
         with st.chat_message("user"):
             st.markdown(prompt)
-        # Add user message to chat history
-        st.session_state.messages.append({"role": "user", "content": prompt})
-        
+         
         with st.spinner("Thinking..."):
             try:
-                 # Use the chat session to send the new message, which maintains history
-                response = chat_session.send_message(prompt, stream=True)
+                # Construct the prompt with the document content if it exists
+                if "document_content" in st.session_state and st.session_state.document_content:
+                    full_prompt = (
+                        f"Document content:\n{st.session_state.document_content}\n\n"
+                        f"Question: {prompt}"
+                    )
+                else:
+                    full_prompt = prompt
                 
-                # Display the streaming response
-                with st.chat_message("assistant"):
-                     # The fix is to iterate through the stream to get the parts of the response
+                # Use the model to generate the response, passing the system instruction
+                # and a history based on session state messages
+                model = genai.GenerativeModel(
+                    MODEL_NAME,
+                    system_instruction=system_instruction_text
+                )
+                
+                # Start a new chat session with the full message history
+                chat_session = model.start_chat(history=[
+                    {"role": m["role"], "parts": [m["content"]]}
+                    for m in st.session_state.messages
+                ])
+
+                # Send the new message and stream the response
+                response = chat_session.send_message(full_prompt, stream=True)
+                
+                # Display the streaming response and build the final response text
+                with st.chat_message("model"):
                     final_response_text = ""
                     for chunk in response:
                         final_response_text += chunk.text
                     st.markdown(final_response_text)
                 
                 # Update chat history with the assistant's final response
-                st.session_state.messages.append({"role": "assistant", "content": response.text})
+                st.session_state.messages.append({"role": "model", "content": final_response_text})
             except Exception as e:
                 st.error(f"An error occurred: {e}")
